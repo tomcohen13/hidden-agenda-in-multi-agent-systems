@@ -75,20 +75,24 @@ async def catch_up_messages(agent, config, messages: list[PublicMessage]) -> lis
     return pending
 
 
-def create_game_agent(name, prompt, *, model, prompts: dict[str, str]) -> CompiledStateGraph:
+def create_game_agent(
+    name, player_prompt: str, *, model, phase_prompts: dict[str, str]
+) -> CompiledStateGraph:
     """Build one player's runtime with isolated memory and phase-specific output."""
 
     @dynamic_prompt
     def phase_prompt(request) -> str:
         """Combine the player's base instructions with the current phase template."""
         context = request.runtime.context
-        phase_instructions = prompts[context["phase"]].format(*context.get("prompt_args", ()))
-        return "\n\n".join([prompt, phase_instructions])
+        phase_instructions = phase_prompts[context["phase"]].format(
+            *context.get("prompt_args", ())
+        )
+        return "\n\n".join([player_prompt, phase_instructions])
 
     return create_agent(
         model=model,
         name=str(name),
-        system_prompt=prompt,
+        system_prompt=player_prompt,
         middleware=[phase_prompt, PhaseResponseFormat()],
         context_schema=AgentContext,
         response_format=ToolStrategy(Nomination | Vote, handle_errors=False),

@@ -14,7 +14,7 @@ from config import SOCIAL_DEDUCTION_PATH
 PROMPTS_DIR = SOCIAL_DEDUCTION_PATH / "prompts"
 
 class PolicyCard(TypedDict):
-    card_id: int
+    card_id: str
     policy: Literal["red", "blue"]
 
 class Deck:
@@ -147,8 +147,9 @@ class Game:
         assert num_red_players >= 2, "Must have at least 2 red players in the game."
         red_leader = random.randint(0, num_red_players - 1)
 
-        # load prompts
-        prompt = self.prompts["player"]
+        # load prompt
+        player_template = self.prompts["player"]
+        phase_prompts = {name: template for name, template in self.prompts.items() if name != "player"}
 
         # initialize agents
         player_assignments = ["red"] * num_red_players + ["blue"] * (cfg.num_players - num_red_players)
@@ -164,9 +165,9 @@ class Game:
                     if v == "red" and k != i
                 ]
                 role_instructions = role_instructions.format(peers=other_red_players, leader=red_leader)
-            agent_prompt = prompt.format(role_instructions=role_instructions)
+            player_prompt = player_template.format(role_instructions=role_instructions)
             agent = create_game_agent(
-                name=i, prompt=agent_prompt, model=cfg.model, prompts=self.prompts
+                name=i, player_prompt=player_prompt, model=cfg.model, phase_prompts=phase_prompts
             )
             self.agents[i] = agent
         return {

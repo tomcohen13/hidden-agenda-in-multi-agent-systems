@@ -10,7 +10,12 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, MessagesState, StateGraph
 from pydantic import Field
 
-from social_deduction.agent import Nomination, Vote, catch_up_messages, create_game_agent
+from social_deduction.agent import (
+    Nomination,
+    Vote,
+    catch_up_messages,
+    create_game_agent,
+)
 
 
 @pytest.fixture
@@ -41,10 +46,14 @@ def test_fresh_history_receives_board_in_order(agent, config, board):
 
     assert all(isinstance(message, HumanMessage) for message in pending)
     assert [message.id for message in pending] == [
-        "public:first", "public:second", "public:third"
+        "public:first",
+        "public:second",
+        "public:third",
     ]
     assert [message.additional_kwargs["public_message_id"] for message in pending] == [
-        "first", "second", "third"
+        "first",
+        "second",
+        "third",
     ]
     assert pending[0].content == "Public board — round 1, player 1:\nHello."
     assert pending[2].content == "Public board — round 2, player 0:\nMy proposal."
@@ -68,22 +77,31 @@ def test_only_unseen_messages_are_returned(agent, config, board, delivered_count
     ]
 
 
-def test_duplicate_ids_are_skipped_but_identical_text_is_preserved(agent, config, board):
-    pending = asyncio.run(catch_up_messages(
-        agent, config, [board[0], board[0], board[1], board[0]]
-    ))
+def test_duplicate_ids_are_skipped_but_identical_text_is_preserved(
+    agent, config, board
+):
+    pending = asyncio.run(
+        catch_up_messages(agent, config, [board[0], board[0], board[1], board[0]])
+    )
 
     assert [message.additional_kwargs["public_message_id"] for message in pending] == [
-        "first", "second"
+        "first",
+        "second",
     ]
 
 
 def test_private_history_does_not_count_as_board_delivery(agent, config, board):
     async def scenario():
-        await agent.aupdate_state(config, {"messages": [
-            HumanMessage(content="Private task."),
-            AIMessage(content="Hello."),
-        ]}, as_node="receive")
+        await agent.aupdate_state(
+            config,
+            {
+                "messages": [
+                    HumanMessage(content="Private task."),
+                    AIMessage(content="Hello."),
+                ]
+            },
+            as_node="receive",
+        )
         return await catch_up_messages(agent, config, board)
 
     assert len(asyncio.run(scenario())) == len(board)
@@ -102,7 +120,9 @@ def test_delivery_is_isolated_by_player_and_game(agent, config, board, other_thr
     assert len(asyncio.run(scenario())) == len(board)
 
 
-def test_catch_up_does_not_mutate_board_or_mark_messages_delivered(agent, config, board):
+def test_catch_up_does_not_mutate_board_or_mark_messages_delivered(
+    agent, config, board
+):
     original_board = deepcopy(board)
 
     async def scenario():
@@ -132,20 +152,41 @@ class RecordingModel(FakeMessagesListChatModel):
 
 
 @pytest.mark.parametrize("use_async", [False, True])
-def test_dynamic_prompt_switches_phase_and_preserves_role_and_history(config, use_async):
-    model = RecordingModel(responses=[
-        AIMessage(content="", tool_calls=[{
-            "name": "Nomination", "id": "nomination",
-            "args": {"policy_maker_id": 2, "justification": "My nominee."},
-        }]),
-        AIMessage(content="", tool_calls=[{
-            "name": "Vote", "id": "vote",
-            "args": {"approve": True, "justification": "I agree."},
-        }]),
-    ])
+def test_dynamic_prompt_switches_phase_and_preserves_role_and_history(
+    config, use_async
+):
+    model = RecordingModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "Nomination",
+                        "id": "nomination",
+                        "args": {"policy_maker_id": 2, "justification": "My nominee."},
+                    }
+                ],
+            ),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "Vote",
+                        "id": "vote",
+                        "args": {"approve": True, "justification": "I agree."},
+                    }
+                ],
+            ),
+        ]
+    )
     agent = create_game_agent(
-        0, "You are a red player.", model=model,
-        prompts={"propose_policy_maker": "Nominate from {}.", "vote": "Cast your vote."},
+        0,
+        player_prompt="You are a red player.",
+        model=model,
+        phase_prompts={
+            "propose_policy_maker": "Nominate from {}.",
+            "vote": "Cast your vote.",
+        },
     )
 
     async def scenario():
@@ -164,11 +205,16 @@ def test_dynamic_prompt_switches_phase_and_preserves_role_and_history(config, us
         assert isinstance(first["structured_response"], Nomination)
         assert isinstance(second["structured_response"], Vote)
         snapshot = await agent.aget_state(config)
-        assert not any(isinstance(message, SystemMessage) for message in snapshot.values["messages"])
+        assert not any(
+            isinstance(message, SystemMessage)
+            for message in snapshot.values["messages"]
+        )
 
     asyncio.run(scenario())
 
-    assert model.requests[0][0].content == "You are a red player.\n\nNominate from [1, 2]."
+    assert (
+        model.requests[0][0].content == "You are a red player.\n\nNominate from [1, 2]."
+    )
     assert model.requests[1][0].content == "You are a red player.\n\nCast your vote."
     assert all(isinstance(request[0], SystemMessage) for request in model.requests)
     assert all(

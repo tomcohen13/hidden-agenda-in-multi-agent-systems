@@ -121,8 +121,12 @@ class Game:
         builder.add_edge("propose_policy_maker", "vote")
         builder.add_conditional_edges(
             "vote",
-            self.is_red_leader_elected,
-            {"red_leader_elected": END, "continue": "draw_and_pass"},
+            self.eval_election_results,
+            {
+                "red_leader_elected": END,
+                "candidate_rejected": "propose_policy_maker",
+                "continue": "draw_and_pass",
+            },
         )
         builder.add_edge("draw_and_pass", "enact")
         builder.add_conditional_edges(
@@ -232,10 +236,10 @@ class Game:
         """Run an ordered discussion with role-appropriate message visibility."""
         raise NotImplementedError
 
-    def is_red_leader_elected(
+    def eval_election_results(
         self, state: GameState
-    ) -> Literal["red_leader_elected", "continue"]:
-        """Check whether electing the red leader triggers a red victory."""
+    ) -> Literal["red_leader_elected", "candidate_rejected", "continue"]:
+        """Route to a new nomination, policy selection, or red-leader victory."""
         raise NotImplementedError
 
     def is_game_over(self, state: GameState) -> Literal["game_over", "continue"]:

@@ -10,7 +10,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, MessagesState, StateGraph
 from pydantic import Field
 
-from agent import Nomination, Vote, catch_up_messages, create_game_agent
+from social_deduction.agent import Nomination, Vote, catch_up_messages, create_game_agent
 
 
 @pytest.fixture

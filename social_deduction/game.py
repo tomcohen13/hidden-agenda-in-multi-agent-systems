@@ -8,7 +8,7 @@ from langgraph.graph.state import CompiledStateGraph
 from typing import Annotated, Any, Literal, TypedDict
 from uuid import uuid4
 
-from agent import Nomination, PublicMessage, catch_up_messages, create_game_agent
+from social_deduction.agent import Nomination, PublicMessage, catch_up_messages, create_game_agent
 from config import SOCIAL_DEDUCTION_PATH
 
 PROMPTS_DIR = SOCIAL_DEDUCTION_PATH / "prompts"

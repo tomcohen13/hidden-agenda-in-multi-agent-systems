@@ -1,0 +1,18 @@
+{
+    "blue_regular": {
+        "team": "blue",
+        "role": "regular",
+        "instructions": "Your goal is to make sure the blue team wins by enacting blue policies."
+    },
+    "red_regular": {
+        "team": "red",
+        "role": "regular",
+        "instructions": "Your goal is to make sure the red team wins by enacting red policies, or by electing the red leader as policy maker once at least 3 red policies have been enacted.",
+        "private_information": "Your team members are players {red_players} and your team leader is {red_leader}. The leader does not know who's in the red team."
+    },
+    "red_leader": {
+        "team": "red",
+        "role": "leader",
+        "instructions": "Your goal is to make sure the red team wins by enacting red policies, or by getting yourself elected as policy maker once at least 3 red policies have been enacted."
+    }
+}

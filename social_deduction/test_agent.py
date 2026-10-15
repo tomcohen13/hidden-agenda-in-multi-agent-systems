@@ -184,14 +184,17 @@ def test_dynamic_prompt_switches_phase_and_preserves_role_and_history(
         player_prompt="You are a red player.",
         model=model,
         phase_prompts={
-            "propose_policy_maker": "Nominate from {}.",
+            "propose_policy_maker": "Nominate from {valid_players}.",
             "vote": "Cast your vote.",
         },
     )
 
     async def scenario():
         inputs = {"messages": [HumanMessage(content="Public discussion.")]}
-        context = {"phase": "propose_policy_maker", "prompt_args": ([1, 2],)}
+        context = {
+            "phase": "propose_policy_maker",
+            "prompt_kwargs": {"valid_players": [1, 2]},
+        }
         if use_async:
             first = await agent.ainvoke(inputs, config=config, context=context)
             second = await agent.ainvoke(

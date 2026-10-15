@@ -7,7 +7,7 @@ from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph.state import CompiledStateGraph
 from pydantic import BaseModel, ConfigDict, Field
-from typing import Literal, NotRequired, TypedDict
+from typing import Any, Literal, NotRequired, TypedDict
 
 
 class PublicMessage(TypedDict):
@@ -38,7 +38,7 @@ RESPONSE_SCHEMAS = {"propose_policy_maker": Nomination, "vote": Vote}
 
 class AgentContext(TypedDict):
     phase: Literal["propose_policy_maker", "vote"]
-    prompt_args: NotRequired[tuple]
+    prompt_kwargs: NotRequired[dict[str, Any]]
 
 
 class PhaseResponseFormat(AgentMiddleware):
@@ -53,7 +53,9 @@ class PhaseResponseFormat(AgentMiddleware):
         return await handler(request.override(response_format=ToolStrategy(schema, handle_errors=False)))
 
 
-async def catch_up_messages(agent, config, messages: list[PublicMessage]) -> list[HumanMessage]:
+async def catch_up_messages(
+    agent: CompiledStateGraph, config: dict, messages: list[PublicMessage]
+) -> list[HumanMessage]:
     """Return public board entries that aren't in this agent's checkpoint history."""
     snapshot = await agent.aget_state(config)
     seen = {
@@ -85,7 +87,7 @@ def create_game_agent(
         """Combine the player's base instructions with the current phase template."""
         context = request.runtime.context
         phase_instructions = phase_prompts[context["phase"]].format(
-            *context.get("prompt_args", ())
+            **context.get("prompt_kwargs", {})
         )
         return "\n\n".join([player_prompt, phase_instructions])
 

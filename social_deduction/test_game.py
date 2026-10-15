@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 from collections import Counter
 
 import pytest
@@ -80,19 +81,20 @@ class TestDeck:
 def test_election_result_requires_elected_leader_and_three_red_policies(
     elected, candidate, red_policies, expected
 ):
-    game = Game.__new__(Game)
+    game = Game(GameConfig(model="scripted"))
     state = {
         "elected": elected,
         "proposed_policy_maker": candidate,
         "red_leader": 1,
         "enacted_policies": {"red": red_policies, "blue": 0},
+        "consecutive_failed_elections": 1,
     }
 
     assert game.eval_election_results(state) == expected
 
 
 def test_game_loads_prompts_and_compiles():
-    game = Game(GameConfig())
+    game = Game(GameConfig(model="scripted"))
 
     game.initialize()
 
@@ -118,8 +120,9 @@ class ScriptedGameModel(FakeMessagesListChatModel):
     ],
 )
 def test_game_runs_through_voting_with_real_prompts(
-    monkeypatch, approvals, elected, failure_count
+    monkeypatch, caplog, approvals, elected, failure_count
 ):
+    caplog.set_level(logging.INFO, logger="social_deduction.game")
     def scripted_agent(name, player_prompt, *, model, phase_prompts):
         responses = []
         if name == 0:
@@ -142,7 +145,7 @@ def test_game_runs_through_voting_with_real_prompts(
 
     monkeypatch.setattr("social_deduction.game.create_game_agent", scripted_agent)
     monkeypatch.setattr("social_deduction.game.random.choice", lambda choices: choices[0])
-    game = Game(GameConfig(num_players=6, p_red=0.34))
+    game = Game(GameConfig(model="scripted", num_players=6, p_red=0.34))
     game.initialize()
     opening = {"id": "opening", "player_id": 5, "round_number": 0, "content": "Ready."}
     initial_state = {
@@ -195,3 +198,7 @@ def test_game_runs_through_voting_with_real_prompts(
     assert [json.loads(message["content"]) for message in result["messages"][2:]] == result["votes"]
     assert len({message["id"] for message in result["messages"]}) == 8
     assert initial_state["messages"] == [opening]
+    assert "Round 1 · manager is player 0" in caplog.text
+    assert "Nomination · player 0 proposes player 1" in caplog.text
+    assert f"Election {'PASSED' if elected else 'REJECTED'}" in caplog.text
+    assert "My public justification." not in caplog.text

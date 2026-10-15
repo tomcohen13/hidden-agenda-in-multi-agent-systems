@@ -1,6 +1,7 @@
 """Base models for experiment"""
 import asyncio
 import json
+import logging
 import random
 from dataclasses import dataclass
 from operator import add
@@ -74,11 +75,11 @@ class GameState(TypedDict):
 
 @dataclass
 class GameConfig:
+    model: str
     blue_cards: int = 6
     red_cards: int = 11
     num_players: int = 10
     p_red: float = 0.3
-    model: str = "openai:gpt-5-mini"
 
 
 class Game:
@@ -86,9 +87,10 @@ class Game:
     def __init__(
         self,
         config: GameConfig,
-        logger = None,
+        logger: logging.Logger | None = None,
     ):
         self.config = config
+        self.logger = logger if logger is not None else logging.getLogger(__name__)
         self.agents: dict[int, CompiledStateGraph] = {}
         self.graph = None
         self.deck = Deck(config.blue_cards, config.red_cards)
@@ -137,6 +139,7 @@ class Game:
         )
         builder.add_edge("discussion", "start_round")
         self.graph = builder.compile()
+        self.logger.debug("Game graph compiled")
 
 
     def initialize_players(self, state: GameState) -> dict[str, Any]:
@@ -144,6 +147,7 @@ class Game:
 
         cfg = self.config
         num_red_players = int(cfg.num_players * cfg.p_red)
+        self.logger.info("Setup · creating %s player runtimes", cfg.num_players)
 
         assert num_red_players >= 2, "Must have at least 2 red players in the game."
         red_leader = random.randint(0, num_red_players - 1)
@@ -186,6 +190,10 @@ class Game:
                 name=i, player_prompt=player_prompt, model=cfg.model, phase_prompts=phase_prompts
             )
             self.agents[i] = agent
+        self.logger.info(
+            "Ready · %s blue / %s red players · deck %s blue / %s red",
+            cfg.num_players - num_red_players, num_red_players, cfg.blue_cards, cfg.red_cards,
+        )
         return {
             "players": dict(enumerate(player_assignments)),
             "red_leader": red_leader,
@@ -199,6 +207,9 @@ class Game:
             next_round_manager = random.choice(list(state["players"].keys()))
         else:
             next_round_manager = (state["round_manager"] + 1) % len(state["players"])
+        self.logger.info(
+            "Round %s · manager is player %s", state["round_number"] + 1, next_round_manager
+        )
         return {
             "round_number": state["round_number"] + 1,
             "round_manager": next_round_manager,
@@ -215,6 +226,10 @@ class Game:
         valid_players = all_players - {round_manager_id, state["last_policy_maker"]}
         if not valid_players:
             raise ValueError("No eligible policy maker is available.")
+        self.logger.info(
+            "Nomination · waiting for player %s · %s eligible candidates",
+            round_manager_id, len(valid_players),
+        )
         round_manager_runner = self.agents[round_manager_id]
         config = {
             "configurable": {"thread_id": f"{state['game_id']}:{round_manager_id}"}
@@ -231,6 +246,10 @@ class Game:
         nomination = Nomination.model_validate(res["structured_response"])
         if nomination.policy_maker_id not in valid_players:
             raise ValueError(f"Ineligible policy maker: {nomination.policy_maker_id}")
+        self.logger.info(
+            "Nomination · player %s proposes player %s",
+            round_manager_id, nomination.policy_maker_id,
+        )
         return {
             "proposed_policy_maker": nomination.policy_maker_id,
             "elected": None,
@@ -247,6 +266,10 @@ class Game:
     async def collect_votes(self, state: GameState) -> dict[str, Any]:
         """Collect votes from a shared snapshot and resolve the nomination."""
 
+        self.logger.info(
+            "Voting · %s players deciding on player %s",
+            len(state["players"]), state["proposed_policy_maker"],
+        )
         async def _vote(player_id: int, state: GameState) -> dict:
 
             agent_runner = self.agents[player_id]
@@ -273,6 +296,10 @@ class Game:
         
         tally = sum(v["approve"] for v in votes)
         elected = tally > len(votes) / 2
+        self.logger.info(
+            "Election %s · %s approve / %s reject",
+            "PASSED" if elected else "REJECTED", tally, len(votes) - tally,
+        )
         return {
             "elected": elected,
             "consecutive_failed_elections": 0 if elected else state["consecutive_failed_elections"] + 1,
@@ -310,11 +337,16 @@ class Game:
             # weird, raise exception
             raise 
         if state["elected"] == False:
+            self.logger.info(
+                "Next · new nomination required · %s consecutive failed elections",
+                state["consecutive_failed_elections"],
+            )
             return "candidate_rejected"
         elif (
             state["proposed_policy_maker"] == state["red_leader"] and
             state["enacted_policies"]["red"] >= 3
         ):
+            self.logger.info("Game over · red leader elected after at least 3 red policies")
             return "red_leader_elected"
         return "continue"
 

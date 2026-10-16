@@ -47,17 +47,30 @@ class Enact(BaseModel):
     policy: Literal["red", "blue"]
     private_justification: str
 
+class Response(BaseModel):
+    """A public response to the group"""
+    
+    model_config = ConfigDict(strict=True, extra="forbid")
+    content: str
+
 
 RESPONSE_SCHEMAS = {
     "propose_policy_maker": Nomination,
     "vote": Vote,
     "draw_and_pass": DrawAndPass,
     "enact": Enact,
+    "discussion": Response,
 }
 
 
 class AgentContext(TypedDict):
-    phase: Literal["propose_policy_maker", "vote", "draw_and_pass", "enact"]
+    phase: Literal[
+        "propose_policy_maker",
+        "vote",
+        "draw_and_pass",
+        "enact",
+        "discussion",
+    ]
     prompt_kwargs: NotRequired[dict[str, Any]]
 
 
@@ -117,6 +130,6 @@ def create_game_agent(
         system_prompt=player_prompt,
         middleware=[phase_prompt, PhaseResponseFormat()],
         context_schema=AgentContext,
-        response_format=ToolStrategy(Nomination | Vote | DrawAndPass | Enact, handle_errors=False),
+        response_format=ToolStrategy(Nomination | Vote | DrawAndPass | Enact | Response, handle_errors=False),
         checkpointer=InMemorySaver(),
     )

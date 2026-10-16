@@ -14,6 +14,8 @@ Pursue your assigned team's objective using the information available to you.
 - Players belong to the blue or red team. Blue is the majority; red is a hidden
   minority with an opposing objective. Blue seeks blue policies, and red seeks
   red policies. One red player is the red leader.
+- The blue team wins when 5 blue policies have been enacted. The red team wins
+  when 5 red policies have been enacted.
 - Each round, a round manager nominates a policy maker. All players, including the manager
   and nominee, vote on whether to approve the nomination. Approval requires
   strictly more than half of all votes; a tie rejects the nominee.

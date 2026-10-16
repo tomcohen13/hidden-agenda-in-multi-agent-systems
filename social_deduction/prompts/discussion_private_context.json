@@ -1,0 +1,4 @@
+{
+    "round_manager": "### Your private observations from this round\n\nThe cards you drew: {drawn_cards}.\nThe cards you passed to the policy maker: {passed_cards}.\nThese observations are supplied only to you.",
+    "policy_maker": "### Your private observations from this round\n\nThe cards you received from the round manager: {passed_cards}.\nThese observations are supplied only to you."
+}

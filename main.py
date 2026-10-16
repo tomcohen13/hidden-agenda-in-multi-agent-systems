@@ -96,6 +96,8 @@ async def run_game(
         enacted_policies={"red": 0, "blue": 0},
         winner=None,
         termination_reason=None,
+        discussion_rounds_limit=1,
+        discussion_time_limit=60,
     )
 
     logger.info("Game %s · %s", initial_state["game_id"], cfg.model)
@@ -117,7 +119,7 @@ def main(argv=None):
         blue_cards=args.blue_cards,
         red_cards=args.red_cards,
     )
-    result = asyncio.run(run_game(cfg, logger, interrupt_before=["discussion"]))
+    result = asyncio.run(run_game(cfg, logger))
     print(json.dumps(result, indent=2))
 
 

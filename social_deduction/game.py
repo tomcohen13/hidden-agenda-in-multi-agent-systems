@@ -7,13 +7,14 @@ from collections import Counter
 from dataclasses import dataclass
 from enum import StrEnum
 from operator import add
+import time
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from typing import Annotated, Any, Literal, TypedDict
 from uuid import uuid4
 
 from social_deduction.agent import (
-    Enact, Nomination, PublicMessage, Vote, DrawAndPass,
+    Enact, Nomination, PublicMessage, Response, Vote, DrawAndPass,
     catch_up_messages, create_game_agent
 )
 from config import SOCIAL_DEDUCTION_PATH
@@ -92,6 +93,8 @@ class GameState(TypedDict):
     messages: Annotated[list[PublicMessage], add]
     winner: Literal["blue", "red"] | None
     termination_reason: TerminationReason | None
+    discussion_time_limit: int  # in seconds
+    discussion_rounds_limit: int
 
 
 @dataclass
@@ -118,6 +121,12 @@ class Game:
         self.prompts: dict = self._load_prompts()
         self.role_instructions = json.loads(
             (PROMPTS_DIR / "role_instructions.json").read_text(encoding="utf-8")
+        )
+        self.discussion_stage_instructions = json.loads(
+            (PROMPTS_DIR / "discussion_stages.json").read_text(encoding="utf-8")
+        )
+        self.discussion_private_context_templates = json.loads(
+            (PROMPTS_DIR / "discussion_private_context.json").read_text(encoding="utf-8")
         )
 
     def _load_prompts(self) -> None:
@@ -363,7 +372,10 @@ class Game:
         decision = DrawAndPass.model_validate(res["structured_response"])
         
         if not is_sublist(decision.passed_cards, drawn_cards_strings):
-            raise ValueError("Passed policies must be available in the drawn hand, including counts.")
+            raise ValueError(
+                "Passed policies must be available in the drawn hand, including counts. "
+                f"Tried: {decision.passed_cards}, but got {drawn_cards_strings}."
+            )
 
         remaining_cards = drawn_cards.copy()
         passed_cards = []
@@ -437,11 +449,170 @@ class Game:
             ]
         }
 
-
     async def discussion(self, state: GameState) -> dict[str, Any]:
-        """Run an ordered discussion with role-appropriate message visibility."""
-        raise NotImplementedError
+        """
+        Player discussion following policy enactment.
 
+        1. [phase 1: defense]
+            1.1. policy-maker says what they got
+            1.2. president responds
+            1.3. publish both to the group
+        2. [phase 2: initial responses]
+            2.1. elicit immediate reactions from all other players in parallel
+        3. [phase 3: sequential]
+            3.1. round-robin, optional responses from players
+        4. [phase 4: closing remarks]
+            4.1 president and policy maker post final remarks
+        """
+
+        async def _respond(
+            player_id: int,
+            state: GameState,
+            phase: str,
+            prompt_kwargs: dict | None,
+            discussion_messages: list[PublicMessage],
+        ) -> dict:
+            """Helper function to elicit reaction from agent given message history, phase"""
+            agent_runner = self.agents[player_id]
+            config = {"configurable": {"thread_id": f"{state['game_id']}:{player_id}"}}
+            
+            new_messages = await catch_up_messages(agent_runner, config, state["messages"] + discussion_messages)
+            discussion_prompt_kwargs = {
+                **prompt_kwargs,
+                "stage_instructions": self.discussion_stage_instructions[prompt_kwargs["stage"]],
+                "round_number": state["round_number"],
+                "round_manager": state["round_manager"],
+                "policy_maker": state["proposed_policy_maker"],
+                "enacted_policies": state["enacted_policies"],
+            }
+            res = await agent_runner.ainvoke(
+                input={"messages": new_messages},
+                config=config,
+                context={
+                    "phase": phase,
+                    "prompt_kwargs": discussion_prompt_kwargs
+                }
+            )
+            response = Response.model_validate(res["structured_response"])
+            msg = PublicMessage(
+                id=str(uuid4()),
+                player_id=player_id,
+                round_number=state["round_number"],
+                content=response.content
+            )
+            self.logger.info(
+                "Discussion · round %s · %s · player %s: %s",
+                state["round_number"], prompt_kwargs["stage"], player_id, response.content,
+            )
+            return msg
+
+        # phase 1
+        start_time = time.time()
+        discussion_messages = []
+        policy_maker_id = state["proposed_policy_maker"]
+        round_manager_id = state["round_manager"]
+        
+        drawn_cards = [card["policy"] for card in state["drawn_cards"]]
+        passed_cards = [card["policy"] for card in state["passed_cards"]]
+        private_context = {
+            policy_maker_id: self.discussion_private_context_templates["policy_maker"].format(
+                passed_cards=", ".join(passed_cards),
+            ),
+            round_manager_id: self.discussion_private_context_templates["round_manager"].format(
+                drawn_cards=", ".join(drawn_cards), passed_cards=", ".join(passed_cards),
+            ),
+        }
+        
+        policy_maker_msg = await _respond(
+            player_id=policy_maker_id,
+            state=state,
+            phase="discussion",
+            prompt_kwargs={
+                "stage": "opening",
+                "private_context": private_context[policy_maker_id]
+            },
+            discussion_messages=discussion_messages,
+        )
+        discussion_messages.append(policy_maker_msg)
+        
+        round_manager_msg = await _respond(
+            player_id=round_manager_id,
+            state=state,
+            phase="discussion",
+            prompt_kwargs={
+                "stage": "opening",
+                "private_context": private_context[round_manager_id]
+            },
+            discussion_messages=discussion_messages,
+        )
+        discussion_messages.append(round_manager_msg)
+        
+        # phase 2
+        all_other_players = [
+            p for p in state["players"] if p not in [policy_maker_id, round_manager_id]
+        ]
+
+        # collect initial reactions from everyone
+        initial_reactions: list[dict] = await asyncio.gather(
+            *(
+                _respond(
+                    player_id,
+                    state, phase="discussion",
+                    prompt_kwargs={"stage": "reaction", "private_context": ""},
+                    discussion_messages=discussion_messages,
+                )
+                for player_id in all_other_players
+            )
+        )
+        discussion_messages.extend(initial_reactions)
+
+        # phase 3: round-robin + closing remarks
+        for _ in range(state["discussion_rounds_limit"]):
+            if (time.time() - start_time) >= state["discussion_time_limit"]:
+                break
+            round_robin_order = all_other_players[:]
+            random.shuffle(round_robin_order)
+            round_robin_order += [policy_maker_id, round_manager_id] # closing remarks
+            for player_id in round_robin_order:
+                msg = await _respond(
+                    player_id,
+                    state=state,
+                    phase="discussion",
+                    prompt_kwargs={
+                        "stage": "round-robin",
+                        "private_context": private_context.get(player_id, "")
+                    },
+                    discussion_messages=discussion_messages
+                )
+                discussion_messages.append(msg)
+        
+        return {"messages": discussion_messages}
+
+
+    def report_game_over(self, state: GameState) -> dict[str, Any]:
+        """Record and log the winning team and the condition that ended the game."""
+        for team, reason in POLICY_TERMINATION_REASONS.items():
+            if state["enacted_policies"][team] >= POLICY_WIN_THRESHOLD:
+                winner = team
+                break
+        else:
+            if not (
+                state["enacted_policies"]["red"] >= RED_LEADER_ELECTION_THRESHOLD and
+                state["proposed_policy_maker"] == state["red_leader"] and
+                state["elected"] is True
+            ):
+                raise ValueError("Cannot report game over without a victory condition.")
+            winner = "red"
+            reason = TerminationReason.RED_LEADER_ELECTED
+
+        self.logger.info(
+            "Game over · %s wins · %s · totals %s blue / %s red",
+            winner, reason, state["enacted_policies"]["blue"], state["enacted_policies"]["red"],
+        )
+        return {"winner": winner, "termination_reason": reason}
+
+
+    ## Router functions ##
     def eval_election_results(
         self, state: GameState
     ) -> Literal[TerminationReason.RED_LEADER_ELECTED, "candidate_rejected", "continue"]:
@@ -468,27 +639,6 @@ class Game:
             return "game_over"
         return "continue"
 
-    def report_game_over(self, state: GameState) -> dict[str, Any]:
-        """Record and log the winning team and the condition that ended the game."""
-        for team, reason in POLICY_TERMINATION_REASONS.items():
-            if state["enacted_policies"][team] >= POLICY_WIN_THRESHOLD:
-                winner = team
-                break
-        else:
-            if not (
-                state["enacted_policies"]["red"] >= RED_LEADER_ELECTION_THRESHOLD and
-                state["proposed_policy_maker"] == state["red_leader"] and
-                state["elected"] is True
-            ):
-                raise ValueError("Cannot report game over without a victory condition.")
-            winner = "red"
-            reason = TerminationReason.RED_LEADER_ELECTED
-
-        self.logger.info(
-            "Game over · %s wins · %s · totals %s blue / %s red",
-            winner, reason, state["enacted_policies"]["blue"], state["enacted_policies"]["red"],
-        )
-        return {"winner": winner, "termination_reason": reason}
 
 def is_sublist(a, b):
     """Check that every item in a occurs in b with sufficient multiplicity."""

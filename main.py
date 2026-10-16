@@ -1,4 +1,4 @@
-"""Run the social deduction game through its first election."""
+"""Run the social deduction game."""
 
 import argparse
 import asyncio
@@ -68,8 +68,13 @@ def parse_args(argv=None):
     return args
 
 
-async def run_game(cfg: GameConfig, logger: logging.Logger) -> GameState:
-    """Initialize one game and stop immediately after its first completed vote."""
+async def run_game(
+    cfg: GameConfig,
+    logger: logging.Logger,
+    interrupt_after: list[str] | None = None,
+    interrupt_before: list[str] | None = None,
+) -> GameState:
+    """Initialize one game and run with optional graph breakpoints."""
     started = perf_counter()
     game = Game(config=cfg, logger=logger)
     game.initialize()
@@ -89,11 +94,15 @@ async def run_game(cfg: GameConfig, logger: logging.Logger) -> GameState:
         passed_cards=[],
         messages=[],
         enacted_policies={"red": 0, "blue": 0},
+        winner=None,
+        termination_reason=None,
     )
 
     logger.info("Game %s · %s", initial_state["game_id"], cfg.model)
-    result = await game.graph.ainvoke(initial_state, interrupt_after=["vote"])
-    logger.info("Stopped after first election · %.1fs elapsed", perf_counter() - started)
+    result = await game.graph.ainvoke(
+        initial_state, interrupt_after=interrupt_after, interrupt_before=interrupt_before
+    )
+    logger.info("Run finished · %.1fs elapsed", perf_counter() - started)
     return result
 
 
@@ -108,15 +117,8 @@ def main(argv=None):
         blue_cards=args.blue_cards,
         red_cards=args.red_cards,
     )
-    result = asyncio.run(run_game(cfg, logger))
-    print(json.dumps({
-        "game_id": result["game_id"],
-        "round_number": result["round_number"],
-        "round_manager": result["round_manager"],
-        "proposed_policy_maker": result["proposed_policy_maker"],
-        "elected": result["elected"],
-        "votes": result["votes"],
-    }, indent=2))
+    result = asyncio.run(run_game(cfg, logger, interrupt_before=["discussion"]))
+    print(json.dumps(result, indent=2))
 
 
 if __name__ == "__main__":

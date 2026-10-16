@@ -33,11 +33,31 @@ class Vote(BaseModel):
     justification: str
 
 
-RESPONSE_SCHEMAS = {"propose_policy_maker": Nomination, "vote": Vote}
+class DrawAndPass(BaseModel):
+    """A private selection of two policy colors to pass to the policy maker."""
+
+    model_config = ConfigDict(strict=True, extra="forbid")
+    passed_cards: list[Literal["red", "blue"]] = Field(min_length=2, max_length=2)
+    private_justification: str
+
+class Enact(BaseModel):
+    """A private selection of one policy color to enact."""
+
+    model_config = ConfigDict(strict=True, extra="forbid")
+    policy: Literal["red", "blue"]
+    private_justification: str
+
+
+RESPONSE_SCHEMAS = {
+    "propose_policy_maker": Nomination,
+    "vote": Vote,
+    "draw_and_pass": DrawAndPass,
+    "enact": Enact,
+}
 
 
 class AgentContext(TypedDict):
-    phase: Literal["propose_policy_maker", "vote"]
+    phase: Literal["propose_policy_maker", "vote", "draw_and_pass", "enact"]
     prompt_kwargs: NotRequired[dict[str, Any]]
 
 
@@ -97,6 +117,6 @@ def create_game_agent(
         system_prompt=player_prompt,
         middleware=[phase_prompt, PhaseResponseFormat()],
         context_schema=AgentContext,
-        response_format=ToolStrategy(Nomination | Vote, handle_errors=False),
+        response_format=ToolStrategy(Nomination | Vote | DrawAndPass | Enact, handle_errors=False),
         checkpointer=InMemorySaver(),
     )

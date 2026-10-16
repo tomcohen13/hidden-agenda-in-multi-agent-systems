@@ -2,6 +2,7 @@
 
 import asyncio
 from copy import deepcopy
+from pathlib import Path
 
 import pytest
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
@@ -13,6 +14,8 @@ from pydantic import Field
 from social_deduction.agent import (
     Nomination,
     Vote,
+    DrawAndPass,
+    Enact,
     catch_up_messages,
     create_game_agent,
 )
@@ -177,6 +180,14 @@ def test_dynamic_prompt_switches_phase_and_preserves_role_and_history(
                     }
                 ],
             ),
+            AIMessage(content="", tool_calls=[{
+                "name": "DrawAndPass", "id": "draw-and-pass",
+                "args": {"passed_cards": ["red", "blue"], "private_justification": "Private choice."},
+            }]),
+            AIMessage(content="", tool_calls=[{
+                "name": "Enact", "id": "enact",
+                "args": {"policy": "blue", "private_justification": "Private enactment choice."},
+            }]),
         ]
     )
     agent = create_game_agent(
@@ -186,6 +197,8 @@ def test_dynamic_prompt_switches_phase_and_preserves_role_and_history(
         phase_prompts={
             "propose_policy_maker": "Nominate from {valid_players}.",
             "vote": "Cast your vote.",
+            "draw_and_pass": (Path(__file__).parent / "prompts" / "draw_and_pass.md").read_text(),
+            "enact": (Path(__file__).parent / "prompts" / "enact.md").read_text(),
         },
     )
 
@@ -200,13 +213,33 @@ def test_dynamic_prompt_switches_phase_and_preserves_role_and_history(
             second = await agent.ainvoke(
                 {"messages": []}, config=config, context={"phase": "vote"}
             )
+            third = await agent.ainvoke(
+                {"messages": []}, config=config,
+                context={"phase": "draw_and_pass", "prompt_kwargs": {"drawn_cards": ["red", "blue", "red"]}},
+            )
+            fourth = await agent.ainvoke(
+                {"messages": []}, config=config,
+                context={"phase": "enact", "prompt_kwargs": {"passed_cards": ["red", "blue"]}},
+            )
         else:
             first = agent.invoke(inputs, config=config, context=context)
             second = agent.invoke(
                 {"messages": []}, config=config, context={"phase": "vote"}
             )
+            third = agent.invoke(
+                {"messages": []}, config=config,
+                context={"phase": "draw_and_pass", "prompt_kwargs": {"drawn_cards": ["red", "blue", "red"]}},
+            )
+            fourth = agent.invoke(
+                {"messages": []}, config=config,
+                context={"phase": "enact", "prompt_kwargs": {"passed_cards": ["red", "blue"]}},
+            )
         assert isinstance(first["structured_response"], Nomination)
         assert isinstance(second["structured_response"], Vote)
+        assert isinstance(third["structured_response"], DrawAndPass)
+        assert third["structured_response"].passed_cards == ["red", "blue"]
+        assert isinstance(fourth["structured_response"], Enact)
+        assert fourth["structured_response"].policy == "blue"
         snapshot = await agent.aget_state(config)
         assert not any(
             isinstance(message, SystemMessage)
@@ -219,6 +252,11 @@ def test_dynamic_prompt_switches_phase_and_preserves_role_and_history(
         model.requests[0][0].content == "You are a red player.\n\nNominate from [1, 2]."
     )
     assert model.requests[1][0].content == "You are a red player.\n\nCast your vote."
+    assert model.requests[2][0].content.startswith("You are a red player.\n\n## Current phase: select policies")
+    assert "['red', 'blue', 'red']" in model.requests[2][0].content
+    assert model.requests[3][0].content.startswith("You are a red player.\n\n## Current phase: enact a policy")
+    assert "['red', 'blue']" in model.requests[3][0].content
+    assert "['red', 'blue', 'red']" not in model.requests[3][0].content
     assert all(isinstance(request[0], SystemMessage) for request in model.requests)
     assert all(
         any(message.content == "Public discussion." for message in request)

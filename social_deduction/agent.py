@@ -1,13 +1,35 @@
 """Agent module"""
 
-from langchain.agents import create_agent
+import json
+from pathlib import Path
+
+from langchain.agents import AgentState, create_agent
 from langchain.agents.middleware import AgentMiddleware, dynamic_prompt
 from langchain.agents.structured_output import ToolStrategy
-from langchain_core.messages import HumanMessage
+from langchain_core.callbacks import AsyncCallbackHandler
+from langchain_core.messages import HumanMessage, messages_to_dict
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph.state import CompiledStateGraph
 from pydantic import BaseModel, ConfigDict, Field
 from typing import Any, Literal, NotRequired, TypedDict
+
+
+class CaptureModelInput(AsyncCallbackHandler):
+    """Save rendered model messages for each call to a local JSON file."""
+
+    async def on_chat_model_start(
+        self, serialized, messages, *, run_id, **kwargs
+    ):
+        directory = Path("debug/model_inputs")
+        directory.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "run_id": str(run_id),
+            "messages": [messages_to_dict(batch) for batch in messages],
+        }
+        (directory / f"{run_id}.json").write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
 
 
 class PublicMessage(TypedDict):
@@ -63,6 +85,12 @@ RESPONSE_SCHEMAS = {
 }
 
 
+class GameAgentState(AgentState):
+    # inherits messages from AgentState
+    player_id: NotRequired[int]
+    phase: NotRequired[str]
+    observation: NotRequired[dict[str, Any]]
+
 class AgentContext(TypedDict):
     phase: Literal[
         "propose_policy_maker",
@@ -111,7 +139,8 @@ async def catch_up_messages(
 
 
 def create_game_agent(
-    name, player_prompt: str, *, model, phase_prompts: dict[str, str]
+    name, player_prompt: str, *, model, phase_prompts: dict[str, str],
+    checkpointer: BaseCheckpointSaver | None = None,
 ) -> CompiledStateGraph:
     """Build one player's runtime with isolated memory and phase-specific output."""
 
@@ -123,13 +152,14 @@ def create_game_agent(
             **context.get("prompt_kwargs", {})
         )
         return "\n\n".join([player_prompt, phase_instructions])
-
+    
     return create_agent(
         model=model,
         name=str(name),
         system_prompt=player_prompt,
+        state_schema=GameAgentState,
         middleware=[phase_prompt, PhaseResponseFormat()],
         context_schema=AgentContext,
         response_format=ToolStrategy(Nomination | Vote | DrawAndPass | Enact | Response, handle_errors=False),
-        checkpointer=InMemorySaver(),
+        checkpointer=checkpointer if checkpointer is not None else InMemorySaver(),
     )

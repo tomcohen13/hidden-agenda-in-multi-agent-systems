@@ -37,6 +37,7 @@ pip-log.txt
 pip-delete-this-directory.txt
 
 # Unit test / coverage reports
+debug/model_inputs/
 htmlcov/
 .tox/
 .nox/
@@ -81,6 +82,11 @@ target/
 # Jupyter Notebook
 .ipynb_checkpoints
 *.ipynb
+
+# agent/game checkpoints
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
 
 # IPython
 profile_default/

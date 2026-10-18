@@ -5,11 +5,15 @@ import asyncio
 import json
 import logging
 import sys
+import aiosqlite
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from time import perf_counter
 from uuid import uuid4
 
 from config import load_env
-from social_deduction.game import Game, GameConfig, GameState
+from social_deduction.agent import RESPONSE_SCHEMAS
+from social_deduction.game import Game, GameConfig, GameState, TerminationReason
 
 
 class ConsoleFormatter(logging.Formatter):
@@ -52,7 +56,7 @@ def configure_logging() -> logging.Logger:
 def parse_args(argv=None):
     """Parse the settings for a single election smoke run."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model", default="openrouter:openai/gpt-6-luna")
+    parser.add_argument("--model", default="openrouter:qwen/qwen3.7-flash")
     parser.add_argument("--num-players", type=int, default=8)
     parser.add_argument("--p-red", type=float, default=0.4)
     parser.add_argument("--blue-cards", type=int, default=6)
@@ -76,36 +80,46 @@ async def run_game(
 ) -> GameState:
     """Initialize one game and run with optional graph breakpoints."""
     started = perf_counter()
-    game = Game(config=cfg, logger=logger)
-    game.initialize()
-
-    initial_state = GameState(
-        game_id=str(uuid4()),
-        players={},
-        red_leader=None,
-        round_number=0,
-        round_manager=None,
-        proposed_policy_maker=None,
-        last_policy_maker=None,
-        votes=[],
-        elected=None,
-        consecutive_failed_elections=0,
-        drawn_cards=[],
-        passed_cards=[],
-        messages=[],
-        enacted_policies={"red": 0, "blue": 0},
-        winner=None,
-        termination_reason=None,
-        discussion_rounds_limit=1,
-        discussion_time_limit=60,
+    checkpoint_types = [*RESPONSE_SCHEMAS.values(), TerminationReason]
+    serde = JsonPlusSerializer(
+        allowed_msgpack_modules=[
+            (cls.__module__, cls.__name__) for cls in checkpoint_types
+        ]
     )
+    async with aiosqlite.connect("checkpoints.sqlite") as connection:
+        checkpointer = AsyncSqliteSaver(connection, serde=serde)
+        game = Game(config=cfg, logger=logger, checkpointer=checkpointer)
+        game.initialize()
 
-    logger.info("Game %s · %s", initial_state["game_id"], cfg.model)
-    result = await game.graph.ainvoke(
-        initial_state, interrupt_after=interrupt_after, interrupt_before=interrupt_before
-    )
-    logger.info("Run finished · %.1fs elapsed", perf_counter() - started)
-    return result
+        initial_state = GameState(
+            game_id=str(uuid4()),
+            players={},
+            red_leader=None,
+            round_number=0,
+            round_manager=None,
+            proposed_policy_maker=None,
+            last_policy_maker=None,
+            votes=[],
+            elected=None,
+            consecutive_failed_elections=0,
+            drawn_cards=[],
+            passed_cards=[],
+            messages=[],
+            enacted_policies={"red": 0, "blue": 0},
+            winner=None,
+            termination_reason=None,
+            discussion_rounds_limit=1,
+            discussion_time_limit=60,
+        )
+
+        logger.info("Game %s · %s", initial_state["game_id"], cfg.model)
+        result = await game.graph.ainvoke(
+            initial_state,
+            interrupt_after=interrupt_after, interrupt_before=interrupt_before,
+            config={"configurable": {"thread_id": f"{initial_state["game_id"]}:game"}}
+        )
+        logger.info("Run finished · %.1fs elapsed", perf_counter() - started)
+        return result
 
 
 def main(argv=None):

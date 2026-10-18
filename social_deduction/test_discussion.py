@@ -56,7 +56,19 @@ def test_discussion_stages_share_only_authorized_messages(monkeypatch, rounds, s
     }
     before = deepcopy(state)
 
-    update = asyncio.run(game.discussion(state))
+    async def scenario():
+        update = await game.discussion(state)
+        for player, agent in game.agents.items():
+            snapshot = await agent.aget_state({
+                "configurable": {"thread_id": f"discussion-test:{player}"}
+            })
+            assert snapshot.values["player_id"] == player
+            assert snapshot.values["phase"] == "discussion"
+            assert snapshot.values["observation"]["round_number"] == 1
+            assert "prompt_kwargs" not in snapshot.values
+        return update
+
+    update = asyncio.run(scenario())
 
     effective_rounds = rounds if seconds else 0
     messages = update["messages"]

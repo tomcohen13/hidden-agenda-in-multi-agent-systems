@@ -9,13 +9,14 @@ from enum import StrEnum
 from operator import add
 import time
 from langgraph.graph import END, START, StateGraph
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph.state import CompiledStateGraph
 from typing import Annotated, Any, Literal, TypedDict
 from uuid import uuid4
 
 from social_deduction.agent import (
     Enact, Nomination, PublicMessage, Response, Vote, DrawAndPass,
-    catch_up_messages, create_game_agent
+    CaptureModelInput, catch_up_messages, create_game_agent
 )
 from config import SOCIAL_DEDUCTION_PATH
 
@@ -111,12 +112,14 @@ class Game:
     def __init__(
         self,
         config: GameConfig,
+        checkpointer: BaseCheckpointSaver | None = None,
         logger: logging.Logger | None = None,
     ):
         self.config = config
         self.logger = logger if logger is not None else logging.getLogger(__name__)
         self.agents: dict[int, CompiledStateGraph] = {}
         self.graph = None
+        self.checkpointer = checkpointer
         self.deck = Deck(config.blue_cards, config.red_cards)
         self.prompts: dict = self._load_prompts()
         self.role_instructions = json.loads(
@@ -170,7 +173,7 @@ class Game:
         )
         builder.add_edge("discussion", "start_round")
         builder.add_edge("report_game_over", END)
-        self.graph = builder.compile()
+        self.graph = builder.compile(checkpointer=self.checkpointer)
         self.logger.debug("Game graph compiled")
 
 
@@ -219,7 +222,11 @@ class Game:
                 red_cards=cfg.red_cards,
             )
             agent = create_game_agent(
-                name=i, player_prompt=player_prompt, model=cfg.model, phase_prompts=phase_prompts
+                name=i,
+                player_prompt=player_prompt,
+                model=cfg.model,
+                phase_prompts=phase_prompts,
+                checkpointer=self.checkpointer,
             )
             self.agents[i] = agent
         self.logger.info(
@@ -267,13 +274,19 @@ class Game:
             "configurable": {"thread_id": f"{state['game_id']}:{round_manager_id}"}
         }
         new_messages = await catch_up_messages(round_manager_runner, config, state["messages"])
+        context = {
+            "phase": "propose_policy_maker",
+            "prompt_kwargs": {"valid_players": sorted(valid_players)},
+        }
         res = await round_manager_runner.ainvoke(
-            {"messages": new_messages},
-            config=config,
-            context={
-                "phase": "propose_policy_maker",
-                "prompt_kwargs": {"valid_players": sorted(valid_players)},
+            {
+                "messages": new_messages,
+                "player_id": round_manager_id,
+                "phase": context["phase"],
+                "observation": context["prompt_kwargs"],
             },
+            config=config,
+            context=context,
         )
         nomination = Nomination.model_validate(res["structured_response"])
         if nomination.policy_maker_id not in valid_players:
@@ -308,13 +321,19 @@ class Game:
             config = {"configurable": {"thread_id": f"{state['game_id']}:{player_id}"}}
             
             new_messages = await catch_up_messages(agent_runner, config, state["messages"])
+            context={
+                "phase": "vote",
+                "prompt_kwargs": {"proposed_policy_maker": state["proposed_policy_maker"]},
+            }
             res = await agent_runner.ainvoke(
-                input={"messages": new_messages},
+                input={
+                    "messages": new_messages,
+                    "player_id": player_id,
+                    "phase": context["phase"],
+                    "observation": context["prompt_kwargs"],
+                },
                 config=config,
-                context={
-                    "phase": "vote",
-                    "prompt_kwargs": {"proposed_policy_maker": state["proposed_policy_maker"]},
-                }
+                context=context,
             )
             vote = Vote.model_validate(res["structured_response"])
             return {"player_id": player_id, **vote.model_dump()}
@@ -357,17 +376,26 @@ class Game:
         
         round_manager_id = state["round_manager"]
         round_manager_runner = self.agents[round_manager_id]
-        config = {"configurable": {"thread_id": f"{state['game_id']}:{round_manager_id}"}}
+        config = {
+            "configurable": {"thread_id": f"{state['game_id']}:{round_manager_id}"},
+            "callbacks": [CaptureModelInput()],
+        }
         self.logger.info("Policy selection · waiting for player %s to pass two cards", round_manager_id)
 
         new_messages = await catch_up_messages(round_manager_runner, config, state["messages"])
+        context = {
+            "phase": "draw_and_pass",
+            "prompt_kwargs": {"drawn_cards": drawn_cards_strings},
+        }
         res = await round_manager_runner.ainvoke(
-            {"messages": new_messages},
-            config=config,
-            context={
-                "phase": "draw_and_pass",
-                "prompt_kwargs": {"drawn_cards": drawn_cards_strings},
+            {
+                "messages": new_messages,
+                "player_id": round_manager_id,
+                "phase": context["phase"],
+                "observation": context["prompt_kwargs"],
             },
+            config=config,
+            context=context,
         )
         decision = DrawAndPass.model_validate(res["structured_response"])
         
@@ -408,18 +436,27 @@ class Game:
         
         policy_maker_id = state["proposed_policy_maker"]
         policy_maker_runner = self.agents[policy_maker_id]
-        config = {"configurable": {"thread_id": f"{state['game_id']}:{policy_maker_id}"}}
+        config = {
+            "configurable": {"thread_id": f"{state['game_id']}:{policy_maker_id}"},
+            "callbacks": [CaptureModelInput()],
+        }
 
         self.logger.info("Enacting · waiting for player %s to enact one card", policy_maker_id)
         new_messages = await catch_up_messages(policy_maker_runner, config, state["messages"])
         
+        context = {
+            "phase": "enact",
+            "prompt_kwargs": {"passed_cards": passed_cards_strings},
+        }
         res = await policy_maker_runner.ainvoke(
-            {"messages": new_messages},
-            config=config,
-            context={
-                "phase": "enact",
-                "prompt_kwargs": {"passed_cards": passed_cards_strings},
+            input={
+                "messages": new_messages,
+                "player_id": policy_maker_id,
+                "phase": context["phase"],
+                "observation": context["prompt_kwargs"],
             },
+            config=config,
+            context=context,
         )
         decision = Enact.model_validate(res["structured_response"])
 
@@ -486,7 +523,12 @@ class Game:
                 "enacted_policies": state["enacted_policies"],
             }
             res = await agent_runner.ainvoke(
-                input={"messages": new_messages},
+                input={
+                    "messages": new_messages,
+                    "player_id": player_id,
+                    "phase": phase,
+                    "observation": discussion_prompt_kwargs,
+                },
                 config=config,
                 context={
                     "phase": phase,

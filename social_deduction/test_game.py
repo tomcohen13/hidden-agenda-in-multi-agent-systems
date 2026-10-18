@@ -128,7 +128,7 @@ def test_game_runs_through_voting_with_real_prompts(
     monkeypatch, caplog, approvals, elected, failure_count, stop_after
 ):
     caplog.set_level(logging.INFO, logger="social_deduction.game")
-    def scripted_agent(name, player_prompt, *, model, phase_prompts):
+    def scripted_agent(name, player_prompt, *, model, phase_prompts, checkpointer=None):
         responses = []
         if name == 0:
             responses.append(AIMessage(content="", tool_calls=[{
@@ -150,7 +150,7 @@ def test_game_runs_through_voting_with_real_prompts(
         assert "{red_leader}" not in player_prompt
         return create_game_agent(
             name, player_prompt, model=ScriptedGameModel(responses=responses),
-            phase_prompts=phase_prompts,
+            phase_prompts=phase_prompts, checkpointer=checkpointer,
         )
 
     monkeypatch.setattr("social_deduction.game.create_game_agent", scripted_agent)
@@ -184,6 +184,14 @@ def test_game_runs_through_voting_with_real_prompts(
             snapshot = await agent.aget_state({
                 "configurable": {"thread_id": f"test-game:{player_id}"}
             })
+            assert snapshot.values["player_id"] == player_id
+            expected_phase = "draw_and_pass" if stop_after == "draw_and_pass" and player_id == 0 else "vote"
+            assert snapshot.values["phase"] == expected_phase
+            assert snapshot.values["observation"] == (
+                {"drawn_cards": ["red", "red", "red"]}
+                if expected_phase == "draw_and_pass" else {"proposed_policy_maker": 1}
+            )
+            assert "prompt_kwargs" not in snapshot.values
             delivered_ids = [
                 message.additional_kwargs["public_message_id"]
                 for message in snapshot.values["messages"]
@@ -277,6 +285,10 @@ def test_draw_and_pass_preserves_card_ids_and_private_visibility(
     kwargs = manager.ainvoke.await_args.kwargs
     assert kwargs["config"]["configurable"]["thread_id"] == "draw-test:0"
     assert kwargs["context"] == {"phase": "draw_and_pass", "prompt_kwargs": {"drawn_cards": hand}}
+    inputs = manager.ainvoke.await_args.args[0]
+    assert inputs["player_id"] == 0
+    assert inputs["phase"] == kwargs["context"]["phase"]
+    assert inputs["observation"] == kwargs["context"]["prompt_kwargs"]
     policy_maker.ainvoke.assert_not_awaited()
     assert "Private selection explanation." not in caplog.text
     assert "card-" not in caplog.text
@@ -351,6 +363,9 @@ def test_enact_updates_only_selected_total_and_publishes_only_outcome(
     kwargs = policy_maker.ainvoke.await_args.kwargs
     assert kwargs["config"]["configurable"]["thread_id"] == "enact-test:1"
     assert kwargs["context"] == {"phase": "enact", "prompt_kwargs": {"passed_cards": hand}}
+    assert kwargs["input"]["player_id"] == 1
+    assert kwargs["input"]["phase"] == kwargs["context"]["phase"]
+    assert kwargs["input"]["observation"] == kwargs["context"]["prompt_kwargs"]
     manager.ainvoke.assert_not_awaited()
 
 

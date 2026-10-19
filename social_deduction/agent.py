@@ -128,9 +128,10 @@ async def catch_up_messages(
     for message in messages:
         if message["id"] in seen:
             continue
+        speaker = "game controller" if message["player_id"] == -1 else f"player {message['player_id']}"
         pending.append(HumanMessage(
             content=(f"Public board — round {message['round_number']}, "
-                     f"player {message['player_id']}:\n{message['content']}"),
+                     f"{speaker}:\n{message['content']}"),
             id=f"public:{message['id']}",
             additional_kwargs={"public_message_id": message["id"]},
         ))

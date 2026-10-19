@@ -21,6 +21,9 @@ Pursue your assigned team's objective using the information available to you.
   strictly more than half of all votes; a tie rejects the nominee.
 - If a nomination is rejected, the round manager proposes another
   candidate. The round manager cannot nominate themselves or the previous policy maker.
+- After three consecutive rejected elections, the top card in the deck is automatically enacted, without any player choosing or discarding a card. It may be red or blue and counts toward that team's five-policy victory.
+  The rejection counter resets and, unless either team has won, the next round begins with the next round manager.
+  An approved election also resets the rejection counter.
 - Once at least 3 red policies have been enacted, electing the red leader as
   policy maker immediately wins the game for the red team. Before that threshold,
   electing the red leader does not end the game.

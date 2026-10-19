@@ -144,7 +144,7 @@ def test_game_runs_through_voting_with_real_prompts(
         if name == 0:
             responses.append(AIMessage(content="", tool_calls=[{
                 "name": "DrawAndPass", "id": "draw-and-pass",
-                "args": {"passed_cards": ["red", "red"], "private_justification": "Private selection."},
+                "args": {"passed_cards": [0, 1], "private_justification": "Private selection."},
             }]))
         assert "{red_players}" not in player_prompt
         assert "{red_leader}" not in player_prompt
@@ -188,7 +188,7 @@ def test_game_runs_through_voting_with_real_prompts(
             expected_phase = "draw_and_pass" if stop_after == "draw_and_pass" and player_id == 0 else "vote"
             assert snapshot.values["phase"] == expected_phase
             assert snapshot.values["observation"] == (
-                {"drawn_cards": ["red", "red", "red"]}
+                {"drawn_cards": "0: red\n1: red\n2: red"}
                 if expected_phase == "draw_and_pass" else {"proposed_policy_maker": 1}
             )
             assert "prompt_kwargs" not in snapshot.values
@@ -216,10 +216,12 @@ def test_game_runs_through_voting_with_real_prompts(
     assert result["consecutive_failed_elections"] == failure_count
     assert [vote["player_id"] for vote in result["votes"]] == list(range(6))
     assert [vote["approve"] for vote in result["votes"]] == approvals
-    assert len(result["messages"]) == 8  # Opening, nomination, then six ballots.
+    assert len(result["messages"]) == 9  # Opening, nomination, six ballots, election result.
     assert result["messages"][0] == opening
-    assert [json.loads(message["content"]) for message in result["messages"][2:]] == result["votes"]
-    assert len({message["id"] for message in result["messages"]}) == 8
+    assert [json.loads(message["content"]) for message in result["messages"][2:8]] == result["votes"]
+    assert result["messages"][-1]["player_id"] == -1
+    assert f"Election {'PASSED' if elected else 'REJECTED'}" in result["messages"][-1]["content"]
+    assert len({message["id"] for message in result["messages"]}) == 9
     assert initial_state["messages"] == [opening]
     assert "Round 1 · manager is player 0" in caplog.text
     assert "Nomination · player 0 proposes player 1" in caplog.text
@@ -261,11 +263,11 @@ def draw_game():
 @pytest.mark.parametrize(
     "hand, selection, expected_indices",
     [
-        (["red", "blue", "red"], ["red", "blue"], [0, 1]),
-        (["red", "blue", "red"], ["blue", "red"], [1, 0]),
-        (["red", "blue", "red"], ["red", "red"], [0, 2]),
-        (["red", "red", "red"], ["red", "red"], [0, 1]),
-        (["blue", "blue", "red"], ["blue", "blue"], [0, 1]),
+        (["red", "blue", "red"], [0, 1], [0, 1]),
+        (["red", "blue", "red"], [1, 0], [1, 0]),
+        (["red", "blue", "red"], [0, 2], [0, 2]),
+        (["red", "red", "red"], [0, 1], [0, 1]),
+        (["blue", "blue", "red"], [0, 1], [0, 1]),
     ],
 )
 def test_draw_and_pass_preserves_card_ids_and_private_visibility(
@@ -284,7 +286,10 @@ def test_draw_and_pass_preserves_card_ids_and_private_visibility(
     assert state["drawn_cards"] == state["passed_cards"] == state["messages"] == []
     kwargs = manager.ainvoke.await_args.kwargs
     assert kwargs["config"]["configurable"]["thread_id"] == "draw-test:0"
-    assert kwargs["context"] == {"phase": "draw_and_pass", "prompt_kwargs": {"drawn_cards": hand}}
+    assert kwargs["context"] == {
+        "phase": "draw_and_pass",
+        "prompt_kwargs": {"drawn_cards": "\n".join(f"{i}: {color}" for i, color in enumerate(hand))},
+    }
     inputs = manager.ainvoke.await_args.args[0]
     assert inputs["player_id"] == 0
     assert inputs["phase"] == kwargs["context"]["phase"]
@@ -294,15 +299,15 @@ def test_draw_and_pass_preserves_card_ids_and_private_visibility(
     assert "card-" not in caplog.text
 
 
-@pytest.mark.parametrize("selection", [["blue", "blue"], ["blue", "red"]])
-def test_draw_and_pass_rejects_unavailable_color_counts(draw_game, selection):
+@pytest.mark.parametrize("selection", [[0, 0], [2, 2], [-1, 2], [0, 3]])
+def test_draw_and_pass_rejects_duplicate_or_out_of_range_indices(draw_game, selection):
     game, state, _, _, _ = draw_game(["red", "red", "red"], selection)
 
-    with pytest.raises(ValueError, match="available in the drawn hand"):
+    with pytest.raises(ValueError, match="two distinct card indices"):
         asyncio.run(game.draw_and_pass(state))
 
 
-@pytest.mark.parametrize("selection", [[], ["red"], ["red"] * 3, ["red", "green"]])
+@pytest.mark.parametrize("selection", [[], [0], [0, 1, 2], ["red", "blue"], ["0", "1"]])
 def test_draw_and_pass_rejects_malformed_selection(draw_game, selection):
     game, state, _, _, _ = draw_game(["red", "blue", "red"], selection)
 
@@ -336,8 +341,9 @@ def enact_game():
 
 @pytest.mark.parametrize(
     "hand, policy",
-    [(["red", "blue"], "red"), (["red", "blue"], "blue"),
-     (["red", "red"], "red"), (["blue", "blue"], "blue")],
+    [(["red", "blue"], 0), (["red", "blue"], 1),
+     (["blue", "red"], 0), (["blue", "red"], 1),
+     (["red", "red"], 1), (["blue", "blue"], 0)],
 )
 def test_enact_updates_only_selected_total_and_publishes_only_outcome(
     enact_game, caplog, hand, policy
@@ -349,7 +355,7 @@ def test_enact_updates_only_selected_total_and_publishes_only_outcome(
     result = asyncio.run(game.enact(state))
 
     expected = {"red": 2, "blue": 1}
-    expected[policy] += 1
+    expected[hand[policy]] += 1
     assert result["enacted_policies"] == expected
     assert state == before
     assert len(result["messages"]) == 1
@@ -357,41 +363,35 @@ def test_enact_updates_only_selected_total_and_publishes_only_outcome(
     assert message["id"]
     assert message["player_id"] == 1
     assert message["round_number"] == 2
-    assert message["content"] == f"I enacted policy: {policy}."
+    assert message["content"] == f"I enacted policy: {hand[policy]}."
     assert "Private enactment explanation." not in caplog.text
     assert f"player 1 chose {policy}" in caplog.text
     kwargs = policy_maker.ainvoke.await_args.kwargs
     assert kwargs["config"]["configurable"]["thread_id"] == "enact-test:1"
-    assert kwargs["context"] == {"phase": "enact", "prompt_kwargs": {"passed_cards": hand}}
+    assert kwargs["context"] == {
+        "phase": "enact",
+        "prompt_kwargs": {"passed_cards": "\n".join(f"{i}: {color}" for i, color in enumerate(hand))},
+    }
     assert kwargs["input"]["player_id"] == 1
     assert kwargs["input"]["phase"] == kwargs["context"]["phase"]
     assert kwargs["input"]["observation"] == kwargs["context"]["prompt_kwargs"]
     manager.ainvoke.assert_not_awaited()
 
 
-@pytest.mark.parametrize("hand, policy", [(["red", "red"], "blue"), (["blue", "blue"], "red")])
-def test_enact_rejects_policy_not_in_hand(enact_game, hand, policy):
-    game, state, _, _ = enact_game(hand, policy)
+@pytest.mark.parametrize("policy", [-1, 2, 3])
+def test_enact_rejects_out_of_range_index(enact_game, policy):
+    game, state, _, _ = enact_game(["red", "blue"], policy)
     before = deepcopy(state)
 
-    with pytest.raises(ValueError, match="available in the passed hand"):
+    with pytest.raises(ValidationError):
         asyncio.run(game.enact(state))
 
     assert state == before
 
 
-@pytest.mark.parametrize("hand", [[], ["red"], ["red", "red", "blue"]])
-def test_enact_requires_two_passed_cards(enact_game, hand):
-    game, state, _, policy_maker = enact_game(hand, "red")
-
-    with pytest.raises(ValueError, match="exactly two passed cards"):
-        asyncio.run(game.enact(state))
-
-    policy_maker.ainvoke.assert_not_awaited()
-
-
-def test_enact_rejects_unknown_policy_color(enact_game):
-    game, state, _, _ = enact_game(["red", "blue"], "green")
+@pytest.mark.parametrize("policy", ["red", "blue", "0", "1", None])
+def test_enact_rejects_non_index_selection(enact_game, policy):
+    game, state, _, _ = enact_game(["red", "blue"], policy)
 
     with pytest.raises(ValidationError):
         asyncio.run(game.enact(state))
@@ -497,3 +497,50 @@ def test_terminal_routes_report_once_and_reach_end(monkeypatch, reason):
     assert len(reports) == 1
     assert result["winner"] == winning_color
     assert result["termination_reason"] == reason
+
+
+@pytest.mark.parametrize("winning_color", ["red", "blue"])
+def test_three_rejections_enact_top_card_reset_and_rotate_then_can_win(monkeypatch, winning_color):
+    game = Game(GameConfig(model="scripted"))
+    other_color = "blue" if winning_color == "red" else "red"
+    counts = {winning_color: 4, other_color: 3}
+    # The deck pops from the end: first the other color, then the winning color.
+    game.deck.cards = [
+        {"card_id": "winner", "policy": winning_color},
+        {"card_id": "first", "policy": other_color},
+    ]
+    managers = []
+    monkeypatch.setattr(game, "initialize_players", lambda state: {})
+    monkeypatch.setattr(game, "propose_policy_maker", lambda state: {"proposed_policy_maker": 2})
+    monkeypatch.setattr("social_deduction.game.random.choice", lambda choices: choices[0])
+
+    async def reject(state):
+        managers.append(state["round_manager"])
+        return {"elected": False, "consecutive_failed_elections": state["consecutive_failed_elections"] + 1}
+
+    monkeypatch.setattr(game, "collect_votes", reject)
+    game.initialize()
+    state = {
+        "players": {0: "blue", 1: "red", 2: "blue", 3: "red"},
+        "round_number": 0, "round_manager": None,
+        "last_policy_maker": 3, "proposed_policy_maker": None,
+        "red_leader": 1, "elected": None, "consecutive_failed_elections": 0,
+        "enacted_policies": counts.copy(), "messages": [],
+    }
+    result = asyncio.run(game.graph.ainvoke(state))
+    assert managers == [0, 0, 0, 1, 1, 1]
+    assert result["enacted_policies"] == {winning_color: 5, other_color: 4}
+    assert state["enacted_policies"] == counts
+    assert game.deck.is_empty()
+    assert result["consecutive_failed_elections"] == 0
+    assert result["last_policy_maker"] == 3  # Rejected nominees never held office.
+    assert result["winner"] == winning_color
+    assert result["termination_reason"] == (
+        TerminationReason.RED_POLICY_THRESHOLD if winning_color == "red"
+        else TerminationReason.BLUE_POLICY_THRESHOLD
+    )
+    assert len(result["messages"]) == 2
+    assert all(m["player_id"] == -1 for m in result["messages"])
+    for message, color in zip(result["messages"], [other_color, winning_color]):
+        assert f"{color} team got a point" in message["content"]
+    assert result["drawn_cards"] == result["passed_cards"] == []

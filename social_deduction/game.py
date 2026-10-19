@@ -66,13 +66,16 @@ class Deck:
     def is_empty(self):
         return len(self.cards) == 0
 
-    def draw_three(self) -> list[PolicyCard, PolicyCard]:
+    def draw_one(self) -> PolicyCard:
+        if self.is_empty():
+            self._initialize_deck()
+        return self.cards.pop()
+
+    def draw_three(self) -> list[PolicyCard]:
         """Pop and return the top card in the deck."""
         drawn = []
-        while len(drawn) < 3:
-            if self.is_empty():
-                self._initialize_deck()
-            drawn.append(self.cards.pop())
+        for _ in range(3):
+            drawn.append(self.draw_one())
         return drawn
 
 
@@ -94,8 +97,6 @@ class GameState(TypedDict):
     messages: Annotated[list[PublicMessage], add]
     winner: Literal["blue", "red"] | None
     termination_reason: TerminationReason | None
-    discussion_time_limit: int  # in seconds
-    discussion_rounds_limit: int
 
 
 @dataclass
@@ -103,8 +104,11 @@ class GameConfig:
     model: str
     blue_cards: int = 6
     red_cards: int = 11
-    num_players: int = 10
-    p_red: float = 0.3
+    num_players: int = 8
+    p_red: float = 0.4
+
+    discussion_rounds_limit: int = 1
+    discussion_time_limit: int = 60  # in seconds
 
 
 class Game:
@@ -114,8 +118,10 @@ class Game:
         config: GameConfig,
         checkpointer: BaseCheckpointSaver | None = None,
         logger: logging.Logger | None = None,
+        prompts_dir=None,
     ):
         self.config = config
+        self.prompts_dir = PROMPTS_DIR if prompts_dir is None else prompts_dir
         self.logger = logger if logger is not None else logging.getLogger(__name__)
         self.agents: dict[int, CompiledStateGraph] = {}
         self.graph = None
@@ -123,18 +129,18 @@ class Game:
         self.deck = Deck(config.blue_cards, config.red_cards)
         self.prompts: dict = self._load_prompts()
         self.role_instructions = json.loads(
-            (PROMPTS_DIR / "role_instructions.json").read_text(encoding="utf-8")
+            (self.prompts_dir / "role_instructions.json").read_text(encoding="utf-8")
         )
         self.discussion_stage_instructions = json.loads(
-            (PROMPTS_DIR / "discussion_stages.json").read_text(encoding="utf-8")
+            (self.prompts_dir / "discussion_stages.json").read_text(encoding="utf-8")
         )
         self.discussion_private_context_templates = json.loads(
-            (PROMPTS_DIR / "discussion_private_context.json").read_text(encoding="utf-8")
+            (self.prompts_dir / "discussion_private_context.json").read_text(encoding="utf-8")
         )
 
     def _load_prompts(self) -> None:
         prompts = {}
-        paths = PROMPTS_DIR.glob("*.md")
+        paths = self.prompts_dir.glob("*.md")
         for path in paths:
             prompts[path.stem] = path.read_text()
         return prompts
@@ -147,6 +153,7 @@ class Game:
         builder.add_node("start_round", self.start_round)  # rotate round manager, increment round number
         builder.add_node("propose_policy_maker", self.propose_policy_maker) # round manager to propose enacter
         builder.add_node("vote", self.collect_votes)
+        builder.add_node("election_deadlock", self.election_deadlock)
         builder.add_node("draw_and_pass", self.draw_and_pass) # round manager draws three policies, passes 2 to enacter 
         builder.add_node("enact", self.enact) 
         builder.add_node("discussion", self.discussion)
@@ -162,10 +169,15 @@ class Game:
             {
                 TerminationReason.RED_LEADER_ELECTED: "report_game_over",
                 "candidate_rejected": "propose_policy_maker",
+                "election_deadlock": "election_deadlock",
                 "continue": "draw_and_pass",
             },
         )
         builder.add_edge("draw_and_pass", "enact")
+        builder.add_conditional_edges(
+            "election_deadlock", self.is_game_over,
+            {"game_over": "report_game_over", "continue": "start_round"},
+        )
         builder.add_conditional_edges(
             "enact",
             self.is_game_over,
@@ -252,7 +264,10 @@ class Game:
         return {
             "round_number": state["round_number"] + 1,
             "round_manager": next_round_manager,
-            "last_policy_maker": state.get("proposed_policy_maker"),
+            "last_policy_maker": (
+                state.get("proposed_policy_maker") if state.get("elected")
+                else state.get("last_policy_maker")
+            ),
             "proposed_policy_maker": None,
             "elected": None,
         }
@@ -351,9 +366,14 @@ class Game:
             "Election %s · %s approve / %s reject",
             "PASSED" if elected else "REJECTED", tally, len(votes) - tally,
         )
+        
+        # TODO: add a system message about election result
+
+        consecutive_failed_elections = 0 if elected else state["consecutive_failed_elections"] + 1
+
         return {
             "elected": elected,
-            "consecutive_failed_elections": 0 if elected else state["consecutive_failed_elections"] + 1,
+            "consecutive_failed_elections": consecutive_failed_elections,
             "votes": votes,
             "messages": [
                 PublicMessage(
@@ -363,6 +383,16 @@ class Game:
                     round_number=state["round_number"],
                 )
                 for v in votes
+            ] + [
+                PublicMessage(
+                    id=str(uuid4()),
+                    player_id=-1,
+                    round_number=state["round_number"],
+                    content=(
+                        f"Election {'PASSED' if elected else 'REJECTED'} · "
+                        f"{tally} approved / {len(votes) - tally} rejected"
+                    ),
+                )
             ]
         }
 
@@ -599,8 +629,8 @@ class Game:
         discussion_messages.extend(initial_reactions)
 
         # phase 3: round-robin + closing remarks
-        for _ in range(state["discussion_rounds_limit"]):
-            if (time.time() - start_time) >= state["discussion_time_limit"]:
+        for _ in range(self.config.discussion_rounds_limit):
+            if (time.time() - start_time) >= self.config.discussion_time_limit:
                 break
             round_robin_order = all_other_players[:]
             random.shuffle(round_robin_order)
@@ -620,6 +650,31 @@ class Game:
         
         return {"messages": discussion_messages}
 
+
+    def election_deadlock(self, state: GameState) -> dict[str, Any]:
+        """Three failed elections, top card enacted automatically."""
+        policies = state["enacted_policies"].copy()
+        top_policy = self.deck.draw_one()["policy"]
+        policies[top_policy] += 1
+        self.logger.info(
+            f"Election deadlock · {top_policy} gains a point · red total %s · blue total %s",
+            policies["red"], policies["blue"]
+        )
+        return {
+            "enacted_policies": policies,
+            "consecutive_failed_elections": 0,
+            "drawn_cards": [],
+            "passed_cards": [],
+            "messages": [
+                PublicMessage(
+                    id=str(uuid4()), player_id=-1, round_number=state["round_number"],
+                    content=(
+                        "Three consecutive elections failed. Top-card policy enacted: "
+                        f"{top_policy} team got a point. The rejection counter resets."
+                    ),
+                )
+            ],
+        }
 
     def report_game_over(self, state: GameState) -> dict[str, Any]:
         """Record and log the winning team and the condition that ended the game."""
@@ -647,12 +702,14 @@ class Game:
     ## Router functions ##
     def eval_election_results(
         self, state: GameState
-    ) -> Literal[TerminationReason.RED_LEADER_ELECTED, "candidate_rejected", "continue"]:
+    ) -> Literal[TerminationReason.RED_LEADER_ELECTED, "candidate_rejected", "election_deadlock", "continue"]:
         """Route to a new nomination, policy selection, or red-leader victory."""
 
         if state["elected"] is None:
             raise ValueError("Cannot evaluate an unresolved election.")
         if state["elected"] == False:
+            if state["consecutive_failed_elections"] >= 3:
+                return "election_deadlock"
             self.logger.info(
                 "Next · new nomination required · %s consecutive failed elections",
                 state["consecutive_failed_elections"],

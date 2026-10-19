@@ -427,7 +427,6 @@ class Game:
         policy_maker_runner = self.agents[policy_maker_id]
         config = {
             "configurable": {"thread_id": f"{state['game_id']}:{policy_maker_id}"},
-            "callbacks": [CaptureModelInput()],
         }
 
         self.logger.info("Enacting · waiting for player %s to enact one card", policy_maker_id)

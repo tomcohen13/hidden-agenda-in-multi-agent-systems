@@ -372,20 +372,19 @@ class Game:
 
         # draw three cards
         drawn_cards = self.deck.draw_three()
-        drawn_cards_strings = [card["policy"] for card in drawn_cards]
+        drawn_cards_strings = [f"{i}: {card['policy']}" for i, card in enumerate(drawn_cards)]
         
         round_manager_id = state["round_manager"]
         round_manager_runner = self.agents[round_manager_id]
         config = {
             "configurable": {"thread_id": f"{state['game_id']}:{round_manager_id}"},
-            "callbacks": [CaptureModelInput()],
         }
         self.logger.info("Policy selection · waiting for player %s to pass two cards", round_manager_id)
 
         new_messages = await catch_up_messages(round_manager_runner, config, state["messages"])
         context = {
             "phase": "draw_and_pass",
-            "prompt_kwargs": {"drawn_cards": drawn_cards_strings},
+            "prompt_kwargs": {"drawn_cards": "\n".join(drawn_cards_strings)},
         }
         res = await round_manager_runner.ainvoke(
             {
@@ -398,18 +397,12 @@ class Game:
             context=context,
         )
         decision = DrawAndPass.model_validate(res["structured_response"])
-        
-        if not is_sublist(decision.passed_cards, drawn_cards_strings):
+        indices = decision.passed_cards
+        if len(set(indices)) != 2 or any(i not in {0,1,2} for i in indices):
             raise ValueError(
-                "Passed policies must be available in the drawn hand, including counts. "
-                f"Tried: {decision.passed_cards}, but got {drawn_cards_strings}."
+                f"Select two distinct card indices; got {indices}."
             )
-
-        remaining_cards = drawn_cards.copy()
-        passed_cards = []
-        for policy in decision.passed_cards:
-            index = next(i for i, card in enumerate(remaining_cards) if card["policy"] == policy)
-            passed_cards.append(remaining_cards.pop(index))
+        passed_cards: list[PolicyCard] = [drawn_cards[i] for i in indices]
 
         # log decision and reasoning
         self.logger.debug(
@@ -429,11 +422,7 @@ class Game:
     async def enact(self, state: GameState) -> dict[str, Any]:
         """Let the enacter choose a passed policy and publish its outcome."""
 
-        passed_cards = state["passed_cards"]
-        if len(passed_cards) != 2:
-            raise ValueError("Enacting requires exactly two passed cards.")
-        passed_cards_strings = [card["policy"] for card in passed_cards]
-        
+        passed_cards_strings = [card['policy'] for card in state["passed_cards"]]
         policy_maker_id = state["proposed_policy_maker"]
         policy_maker_runner = self.agents[policy_maker_id]
         config = {
@@ -446,7 +435,11 @@ class Game:
         
         context = {
             "phase": "enact",
-            "prompt_kwargs": {"passed_cards": passed_cards_strings},
+            "prompt_kwargs": {
+                "passed_cards": "\n".join(
+                    f"{i}: {policy}" for i, policy in enumerate(passed_cards_strings)
+                )
+            },
         }
         res = await policy_maker_runner.ainvoke(
             input={
@@ -459,12 +452,10 @@ class Game:
             context=context,
         )
         decision = Enact.model_validate(res["structured_response"])
-
-        if decision.policy not in passed_cards_strings:
-            raise ValueError("The enacted policy must be available in the passed hand.")
+        policy_color = passed_cards_strings[decision.policy]
 
         enacted_policies = state["enacted_policies"].copy()
-        enacted_policies[decision.policy] += 1
+        enacted_policies[policy_color] += 1
         self.logger.debug(
             "Private enactment · player %s · justification: %s",
             policy_maker_id, decision.private_justification,
@@ -480,7 +471,7 @@ class Game:
                 PublicMessage(
                     id=str(uuid4()),
                     player_id=policy_maker_id,
-                    content=f"I enacted policy: {decision.policy}.",
+                    content=f"I enacted policy: {policy_color}.",
                     round_number=state["round_number"],
                 )
             ]

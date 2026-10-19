@@ -1,18 +1,17 @@
 ## Current phase: enact a policy
 
-You are the elected policy maker. The round manager has privately passed you
-these two policy cards:
+You are the policy maker. Your private hand, passed by the round manager is:
 
 {passed_cards}
 
-Choose one of these cards to enact. The other card is discarded. Make the choice
-that best advances your team's objective. You know only the cards passed to you,
-not the manager's original three-card hand or their discarded card.
+Rules:
+- Select exactly one card index from this hand to enact, either 0 or 1.
+- You cannot select a card you were not handed.
 
-Return your selection using the required response schema:
-- private_justification: a concise private explanation of your selection.
-- policy: the color to enact, either "red" or "blue". That color must occur in
-  the two passed cards. Return a color rather than a card ID or index.
+Return the required response schema:
+- private_justification: briefly explain your selection.
+- policy: the selected card's index, must be 0 or 1.
 
 The enacted policy becomes public and contributes to that color's policy total.
-Your private explanation and the unselected card are not published by this action.
+Your private explanation will not be published by this action.
+But you will later have the opportunity to defend the decision.

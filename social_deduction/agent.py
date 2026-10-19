@@ -56,17 +56,17 @@ class Vote(BaseModel):
 
 
 class DrawAndPass(BaseModel):
-    """A private selection of two policy colors to pass to the policy maker."""
+    """A private selection of two policy cards to pass to the policy-maker."""
 
     model_config = ConfigDict(strict=True, extra="forbid")
-    passed_cards: list[Literal["red", "blue"]] = Field(min_length=2, max_length=2)
+    passed_cards: list[int] = Field(min_length=2, max_length=2)
     private_justification: str
 
 class Enact(BaseModel):
     """A private selection of one policy color to enact."""
 
     model_config = ConfigDict(strict=True, extra="forbid")
-    policy: Literal["red", "blue"]
+    policy: Literal[0, 1]
     private_justification: str
 
 class Response(BaseModel):

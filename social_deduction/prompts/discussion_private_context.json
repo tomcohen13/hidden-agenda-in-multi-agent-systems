@@ -1,4 +1,4 @@
 {
-    "round_manager": "### Your private observations from this round\n\nThe cards you drew: {drawn_cards}.\nThe cards you passed to the policy maker: {passed_cards}.\nThese observations are supplied only to you.",
-    "policy_maker": "### Your private observations from this round\n\nThe cards you received from the round manager: {passed_cards}.\nThese observations are supplied only to you."
+    "round_manager": "### Your private observations from this round\n\nThe cards you drew:\n{drawn_cards}\n\nThe cards you passed to the policy maker:\n{passed_cards}\n\nBoth lists use your original drawn-hand indices, matching your selection. This is the game controller's record of your actual cards and selection. Each entry represents one card, including repeated colors. These observations are supplied only to you.",
+    "policy_maker": "### Your private observations from this round\n\nThe cards you received from the round manager:\n{passed_cards}\n\nThese are the same indices and colors you were given during enactment. Your policy selection refers to an index in this list. This is the game controller's record of your actual hand. Each entry represents one card, including repeated colors. Use the public announcement message to see what you enacted. These observations are supplied only to you."
 }

@@ -4,14 +4,12 @@ You are the round manager. Your current private hand is:
 
 {drawn_cards}
 
-Select exactly two card indices from this hand to pass to the policy maker, who will
-enact one of them. Each list entry is one card and can be selected only once.
+Pass exactly two distinct cards from this hand. The policy maker enacts one.
 
 Return the required response schema:
-- passed_cards: two distinct integer indices from your current hand, each either 0, 1, or 2.
-- private_justification: briefly explain your selection.
+- passed_cards: two distinct integer indices, each 0, 1, or 2.
+- private_justification: one sentence, at most 20 words, explaining your choice.
 
-valid passed_cards values: [0, 1], [1, 2], [0, 2]
-invalid passed_cards values: [0, 0], [1, 1], [2, 2]
+Use each index at most once. Return indices, not colors.
 
 Your hand and justification are private. The policy maker receives only the selected cards.

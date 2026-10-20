@@ -28,7 +28,10 @@ class DiscussionModel(FakeMessagesListChatModel):
 @pytest.mark.parametrize("rounds, seconds", [(2, 60), (0, 60), (2, 0)])
 def test_discussion_stages_share_only_authorized_messages(monkeypatch, rounds, seconds):
     monkeypatch.setattr("social_deduction.game.random.shuffle", lambda values: None)
-    game = Game(GameConfig(model="scripted", num_players=5, p_red=0.4))
+    game = Game(GameConfig(
+        model="scripted", num_players=5, p_red=0.4,
+        discussion_rounds_limit=rounds, discussion_time_limit=seconds,
+    ))
     models = {}
     for player in range(5):
         models[player] = DiscussionModel(responses=[
@@ -50,9 +53,8 @@ def test_discussion_stages_share_only_authorized_messages(monkeypatch, rounds, s
         "game_id": "discussion-test", "round_number": 1,
         "players": {0: "red", 1: "blue", 2: "red", 3: "blue", 4: "blue"},
         "round_manager": 0, "proposed_policy_maker": 1,
-        "drawn_cards": drawn, "passed_cards": drawn[:2],
+        "drawn_cards": drawn, "passed_cards": [drawn[2], drawn[0]],
         "enacted_policies": {"red": 1, "blue": 0}, "messages": [opening],
-        "discussion_rounds_limit": rounds, "discussion_time_limit": seconds,
     }
     before = deepcopy(state)
 
@@ -102,11 +104,11 @@ def test_discussion_stages_share_only_authorized_messages(monkeypatch, rounds, s
             assert "Round manager: player 0" in system_prompt
             assert "Policy maker: player 1" in system_prompt
             if player == 0:
-                assert "The cards you drew: red, blue, blue." in system_prompt
-                assert "The cards you passed to the policy maker: red, blue." in system_prompt
+                assert "The cards you drew:\n0: red\n1: blue\n2: blue" in system_prompt
+                assert "The cards you passed to the policy maker:\n2: blue\n0: red" in system_prompt
                 assert "The cards you received from the round manager:" not in system_prompt
             elif player == 1:
-                assert "The cards you received from the round manager: red, blue." in system_prompt
+                assert "The cards you received from the round manager:\n0: blue\n1: red" in system_prompt
                 assert "The cards you drew:" not in system_prompt
                 assert "The cards you passed to the policy maker:" not in system_prompt
             else:

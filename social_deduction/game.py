@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from operator import add
 import time
+from langchain_openrouter import ChatOpenRouter
 from langgraph.graph import END, START, StateGraph
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph.state import CompiledStateGraph
@@ -102,6 +103,7 @@ class GameState(TypedDict):
 @dataclass
 class GameConfig:
     model: str
+    model_retries: int = 1
     blue_cards: int = 6
     red_cards: int = 11
     num_players: int = 8
@@ -121,6 +123,12 @@ class Game:
         prompts_dir=None,
     ):
         self.config = config
+        self.model = ChatOpenRouter(
+            model=config.model,
+            timeout=40_000,
+            max_retries=0,
+            max_completion_tokens=1024,
+        )
         self.prompts_dir = PROMPTS_DIR if prompts_dir is None else prompts_dir
         self.logger = logger if logger is not None else logging.getLogger(__name__)
         self.agents: dict[int, CompiledStateGraph] = {}
@@ -236,7 +244,7 @@ class Game:
             agent = create_game_agent(
                 name=i,
                 player_prompt=player_prompt,
-                model=cfg.model,
+                model=self.model,
                 phase_prompts=phase_prompts,
                 checkpointer=self.checkpointer,
             )
@@ -286,7 +294,8 @@ class Game:
         )
         round_manager_runner = self.agents[round_manager_id]
         config = {
-            "configurable": {"thread_id": f"{state['game_id']}:{round_manager_id}"}
+            "configurable": {"thread_id": f"{state['game_id']}:{round_manager_id}"},
+            "callbacks": [CaptureModelInput()],
         }
         new_messages = await catch_up_messages(round_manager_runner, config, state["messages"])
         context = {
@@ -408,6 +417,7 @@ class Game:
         round_manager_runner = self.agents[round_manager_id]
         config = {
             "configurable": {"thread_id": f"{state['game_id']}:{round_manager_id}"},
+            "callbacks": [CaptureModelInput()],
         }
         self.logger.info("Policy selection · waiting for player %s to pass two cards", round_manager_id)
 
@@ -457,6 +467,7 @@ class Game:
         policy_maker_runner = self.agents[policy_maker_id]
         config = {
             "configurable": {"thread_id": f"{state['game_id']}:{policy_maker_id}"},
+            "callbacks": [CaptureModelInput()],
         }
 
         self.logger.info("Enacting · waiting for player %s to enact one card", policy_maker_id)
@@ -491,7 +502,7 @@ class Game:
         )
         self.logger.info(
             "Policy enacted · player %s chose %s · totals %s blue / %s red",
-            policy_maker_id, decision.policy, enacted_policies["blue"], enacted_policies["red"],
+            policy_maker_id, policy_color, enacted_policies["blue"], enacted_policies["red"],
         )
         
         return {
@@ -531,7 +542,14 @@ class Game:
         ) -> dict:
             """Helper function to elicit reaction from agent given message history, phase"""
             agent_runner = self.agents[player_id]
-            config = {"configurable": {"thread_id": f"{state['game_id']}:{player_id}"}}
+            config = {
+                "configurable": {"thread_id": f"{state['game_id']}:{player_id}"},
+                "callbacks": (
+                    [CaptureModelInput()]
+                    if player_id in [state["proposed_policy_maker"], state["round_manager"]]
+                    else []
+                ),
+            }
             
             new_messages = await catch_up_messages(agent_runner, config, state["messages"] + discussion_messages)
             discussion_prompt_kwargs = {
@@ -574,14 +592,23 @@ class Game:
         policy_maker_id = state["proposed_policy_maker"]
         round_manager_id = state["round_manager"]
         
-        drawn_cards = [card["policy"] for card in state["drawn_cards"]]
-        passed_cards = [card["policy"] for card in state["passed_cards"]]
+        drawn_cards = "\n".join(
+            f"{i}: {card['policy']}" for i, card in enumerate(state["drawn_cards"])
+        )
+        passed_cards = "\n".join(
+            f"{i}: {card['policy']}" for i, card in enumerate(state["passed_cards"])
+        )
+        drawn_indices = {card["card_id"]: i for i, card in enumerate(state["drawn_cards"])}
+        manager_passed_cards = "\n".join(
+            f"{drawn_indices[card['card_id']]}: {card['policy']}"
+            for card in state["passed_cards"]
+        )
         private_context = {
             policy_maker_id: self.discussion_private_context_templates["policy_maker"].format(
-                passed_cards=", ".join(passed_cards),
+                passed_cards=passed_cards,
             ),
             round_manager_id: self.discussion_private_context_templates["round_manager"].format(
-                drawn_cards=", ".join(drawn_cards), passed_cards=", ".join(passed_cards),
+                drawn_cards=drawn_cards, passed_cards=manager_passed_cards,
             ),
         }
         
